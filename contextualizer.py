@@ -320,23 +320,26 @@ def _extract_enumerator_names(node: ts.Node) -> list[str]:
 
 
 def _walk_enumerators(node: ts.Node, names: list[str]) -> None:
-    if node.type == "enumerator":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            names.append(_node_text(name_node))
-        return
-    for child in node.children:
-        _walk_enumerators(child, names)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "enumerator":
+            name_node = current.child_by_field_name("name")
+            if name_node:
+                names.append(_node_text(name_node))
+            continue
+        for child in reversed(current.children):
+            stack.append(child)
 
 
 def _find_child_of_type(node: ts.Node, type_name: str) -> ts.Node | None:
     """Find the first direct or nested child with the given node type."""
-    for child in node.children:
-        if child.type == type_name:
-            return child
-        result = _find_child_of_type(child, type_name)
-        if result:
-            return result
+    stack = list(node.children)
+    while stack:
+        current = stack.pop(0)
+        if current.type == type_name:
+            return current
+        stack.extend(current.children)
     return None
 
 
@@ -359,16 +362,18 @@ def _collect_identifiers_in_node(node: ts.Node) -> set[str]:
 
 
 def _walk_identifiers(node: ts.Node, ids: set[str]) -> None:
-    """Recursively walk the AST collecting identifiers."""
-    if node.type == "identifier":
-        ids.add(_node_text(node))
-    elif node.type == "type_identifier":
-        ids.add(_node_text(node))
-    elif node.type == "field_identifier":
-        # field access like s->field — we track the field name too
-        ids.add(_node_text(node))
-    for child in node.children:
-        _walk_identifiers(child, ids)
+    """Iteratively walk the AST collecting identifiers."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "identifier":
+            ids.add(_node_text(current))
+        elif current.type == "type_identifier":
+            ids.add(_node_text(current))
+        elif current.type == "field_identifier":
+            # field access like s->field — we track the field name too
+            ids.add(_node_text(current))
+        stack.extend(current.children)
 
 
 def _collect_call_identifiers(node: ts.Node) -> set[str]:
@@ -379,12 +384,14 @@ def _collect_call_identifiers(node: ts.Node) -> set[str]:
 
 
 def _walk_calls(node: ts.Node, calls: set[str]) -> None:
-    if node.type == "call_expression":
-        func = node.child_by_field_name("function")
-        if func and func.type == "identifier":
-            calls.add(_node_text(func))
-    for child in node.children:
-        _walk_calls(child, calls)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            func = current.child_by_field_name("function")
+            if func and func.type == "identifier":
+                calls.add(_node_text(func))
+        stack.extend(current.children)
 
 
 # ---------------------------------------------------------------------------
@@ -466,13 +473,18 @@ def _index_file_deep(parser: ts.Parser, rel_path: str, source: bytes) -> list[Sn
 
 
 def _walk_for_definitions(node: ts.Node, rel_path: str, snippets: list[Snippet]) -> None:
-    """Walk the entire AST looking for definitions at any depth."""
-    found = _node_to_snippets(node, rel_path)
-    if found:
-        snippets.extend(found)
-        return  # don't recurse into this node's children for more defs
-    for child in node.children:
-        _walk_for_definitions(child, rel_path, snippets)
+    """Walk the entire AST looking for definitions at any depth (iterative)."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        found = _node_to_snippets(current, rel_path)
+        if found:
+            snippets.extend(found)
+            # don't recurse into this node's children for more defs
+            continue
+        # Push children in reverse so we process them in order
+        for child in reversed(current.children):
+            stack.append(child)
 
 
 def _build_index_deep(root_path: str, parser: ts.Parser) -> CodebaseIndex:
@@ -610,25 +622,27 @@ def _collect_local_declarations(body_node: ts.Node) -> set[str]:
 
 
 def _walk_local_decls(node: ts.Node, locals_: set[str]) -> None:
-    if node.type == "declaration":
-        declarator = node.child_by_field_name("declarator")
-        if declarator:
-            name = _find_identifier_in_declarator(declarator)
-            if name:
-                locals_.add(name)
-        # Handle multiple declarators (e.g., int a, b;)
-        for child in node.children:
-            if child.type == "init_declarator":
-                decl = child.child_by_field_name("declarator")
-                if decl:
-                    name = _find_identifier_in_declarator(decl)
-                    if name:
-                        locals_.add(name)
-    # Don't recurse into nested function definitions
-    if node.type == "function_definition":
-        return
-    for child in node.children:
-        _walk_local_decls(child, locals_)
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "declaration":
+            declarator = current.child_by_field_name("declarator")
+            if declarator:
+                name = _find_identifier_in_declarator(declarator)
+                if name:
+                    locals_.add(name)
+            # Handle multiple declarators (e.g., int a, b;)
+            for child in current.children:
+                if child.type == "init_declarator":
+                    decl = child.child_by_field_name("declarator")
+                    if decl:
+                        name = _find_identifier_in_declarator(decl)
+                        if name:
+                            locals_.add(name)
+        # Don't recurse into nested function definitions
+        if current.type == "function_definition":
+            continue
+        stack.extend(current.children)
 
 
 def _collect_param_names(func_node: ts.Node) -> set[str]:
@@ -834,26 +848,26 @@ def _find_pointer_call(
 def _walk_pointer_calls(
     node: ts.Node, pointer_names: set[str]
 ) -> tuple[str, int] | None:
-    if node.type == "call_expression":
-        func = node.child_by_field_name("function")
-        if func:
-            # Direct pointer call: ptr(...)
-            if func.type == "identifier" and _node_text(func) in pointer_names:
-                return (_node_text(func), node.start_point[0] + 1)
-            # Field access call: s->field(...) or s.field(...)
-            if func.type == "field_expression":
-                field = func.child_by_field_name("field")
-                if field and _node_text(field) in pointer_names:
-                    return (_node_text(field), node.start_point[0] + 1)
-            # Array subscript call: arr[i](...)
-            if func.type == "subscript_expression":
-                arr = func.child_by_field_name("argument")
-                if arr and arr.type == "identifier" and _node_text(arr) in pointer_names:
-                    return (_node_text(arr), node.start_point[0] + 1)
-    for child in node.children:
-        result = _walk_pointer_calls(child, pointer_names)
-        if result:
-            return result
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            func = current.child_by_field_name("function")
+            if func:
+                # Direct pointer call: ptr(...)
+                if func.type == "identifier" and _node_text(func) in pointer_names:
+                    return (_node_text(func), current.start_point[0] + 1)
+                # Field access call: s->field(...) or s.field(...)
+                if func.type == "field_expression":
+                    field = func.child_by_field_name("field")
+                    if field and _node_text(field) in pointer_names:
+                        return (_node_text(field), current.start_point[0] + 1)
+                # Array subscript call: arr[i](...)
+                if func.type == "subscript_expression":
+                    arr = func.child_by_field_name("argument")
+                    if arr and arr.type == "identifier" and _node_text(arr) in pointer_names:
+                        return (_node_text(arr), current.start_point[0] + 1)
+        stack.extend(current.children)
     return None
 
 
