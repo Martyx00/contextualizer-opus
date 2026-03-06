@@ -1109,3 +1109,22 @@ def create_context(
 
     # 5. Format and return
     return _format_context(target, dependencies, code_paths)
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 4:
+        print("Usage: python c_context_builder.py <repo_root> <file_path> <line> [depth]")
+        print()
+        print("  repo_root  – path to the C repository root")
+        print("  file_path  – path to the target file, relative to repo_root")
+        print("  line       – 1-based line number")
+        print("  depth      – call-stack depth (default: 1)")
+        sys.exit(1)
+
+    _root = sys.argv[1]
+    _file = sys.argv[2]
+    _line = int(sys.argv[3])
+    _depth = int(sys.argv[4]) if len(sys.argv) > 4 else 1
+
+    print(create_context(_root, _file, _line, _depth))
