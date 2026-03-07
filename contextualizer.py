@@ -528,21 +528,23 @@ def _find_target_function(
 def _find_functions_containing_line(
     node: ts.Node, rel_path: str, target_row: int, results: list[Snippet]
 ) -> None:
-    """Recursively find function_definition nodes containing the target row."""
-    if node.type == "function_definition":
-        if node.start_point[0] <= target_row <= node.end_point[0]:
-            name = _extract_function_name(node)
-            if name:
-                results.append(Snippet(
-                    name=name,
-                    kind="function",
-                    file_path=rel_path,
-                    start_line=node.start_point[0] + 1,
-                    end_line=node.end_point[0] + 1,
-                    text=_node_text(node),
-                ))
-    for child in node.children:
-        _find_functions_containing_line(child, rel_path, target_row, results)
+    """Iteratively find function_definition nodes containing the target row."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "function_definition":
+            if current.start_point[0] <= target_row <= current.end_point[0]:
+                name = _extract_function_name(current)
+                if name:
+                    results.append(Snippet(
+                        name=name,
+                        kind="function",
+                        file_path=rel_path,
+                        start_line=current.start_point[0] + 1,
+                        end_line=current.end_point[0] + 1,
+                        text=_node_text(current),
+                    ))
+        stack.extend(current.children)
 
 
 # ---------------------------------------------------------------------------
@@ -603,14 +605,14 @@ def _resolve_dependencies(
 
 
 def _find_func_node_at(node: ts.Node, target_row: int) -> ts.Node | None:
-    """Find the function_definition node at the given row."""
-    if node.type == "function_definition":
-        if node.start_point[0] <= target_row <= node.end_point[0]:
-            return node
-    for child in node.children:
-        result = _find_func_node_at(child, target_row)
-        if result:
-            return result
+    """Find the function_definition node at the given row (iterative)."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "function_definition":
+            if current.start_point[0] <= target_row <= current.end_point[0]:
+                return current
+        stack.extend(current.children)
     return None
 
 
@@ -710,15 +712,15 @@ def _find_callers(
 
 
 def _find_call_line(node: ts.Node, func_name: str) -> int | None:
-    """Find the line number where func_name is called within node."""
-    if node.type == "call_expression":
-        func = node.child_by_field_name("function")
-        if func and func.type == "identifier" and _node_text(func) == func_name:
-            return node.start_point[0] + 1
-    for child in node.children:
-        result = _find_call_line(child, func_name)
-        if result:
-            return result
+    """Find the line number where func_name is called within node (iterative)."""
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "call_expression":
+            func = current.child_by_field_name("function")
+            if func and func.type == "identifier" and _node_text(func) == func_name:
+                return current.start_point[0] + 1
+        stack.extend(current.children)
     return None
 
 
@@ -787,49 +789,48 @@ def _find_pointer_assignments(
     struct_field_assignments: list[tuple[str, str]],
 ) -> None:
     """Find where target_name is assigned to a pointer, struct field, or array."""
-    if node.type == "assignment_expression":
-        right = node.child_by_field_name("right")
-        if right and right.type == "identifier" and _node_text(right) == target_name:
-            left = node.child_by_field_name("left")
-            if left:
-                if left.type == "identifier":
-                    pointer_names.add(_node_text(left))
-                elif left.type == "field_expression":
-                    field = left.child_by_field_name("field")
-                    if field:
-                        pointer_names.add(_node_text(field))
-                elif left.type == "subscript_expression":
-                    arr = left.child_by_field_name("argument")
-                    if arr and arr.type == "identifier":
-                        pointer_names.add(_node_text(arr))
+    stack = [node]
+    while stack:
+        current = stack.pop()
 
-    elif node.type == "init_declarator":
-        value = node.child_by_field_name("value")
-        if value and value.type == "identifier" and _node_text(value) == target_name:
-            decl = node.child_by_field_name("declarator")
-            if decl:
-                name = _find_identifier_in_declarator(decl)
-                if name:
-                    pointer_names.add(name)
+        if current.type == "assignment_expression":
+            right = current.child_by_field_name("right")
+            if right and right.type == "identifier" and _node_text(right) == target_name:
+                left = current.child_by_field_name("left")
+                if left:
+                    if left.type == "identifier":
+                        pointer_names.add(_node_text(left))
+                    elif left.type == "field_expression":
+                        field = left.child_by_field_name("field")
+                        if field:
+                            pointer_names.add(_node_text(field))
+                    elif left.type == "subscript_expression":
+                        arr = left.child_by_field_name("argument")
+                        if arr and arr.type == "identifier":
+                            pointer_names.add(_node_text(arr))
 
-    elif node.type == "initializer_pair" or node.type == "field_designator":
-        # Designated initializer: .field = target_name
-        pass  # handled by parent
+        elif current.type == "init_declarator":
+            value = current.child_by_field_name("value")
+            if value and value.type == "identifier" and _node_text(value) == target_name:
+                decl = current.child_by_field_name("declarator")
+                if decl:
+                    name = _find_identifier_in_declarator(decl)
+                    if name:
+                        pointer_names.add(name)
 
-    elif node.type == "initializer_list":
-        # Check each element for target_name references
-        for child in node.children:
-            if child.type == "initializer_pair":
-                value_nodes = [c for c in child.children if c.type == "identifier"]
-                designators = [c for c in child.children if c.type == "field_designator"]
-                for v in value_nodes:
-                    if _node_text(v) == target_name:
-                        for d in designators:
-                            fname = _node_text(d).lstrip(".")
-                            pointer_names.add(fname)
+        elif current.type == "initializer_list":
+            # Check each element for target_name references
+            for child in current.children:
+                if child.type == "initializer_pair":
+                    value_nodes = [c for c in child.children if c.type == "identifier"]
+                    designators = [c for c in child.children if c.type == "field_designator"]
+                    for v in value_nodes:
+                        if _node_text(v) == target_name:
+                            for d in designators:
+                                fname = _node_text(d).lstrip(".")
+                                pointer_names.add(fname)
 
-    for child in node.children:
-        _find_pointer_assignments(child, target_name, pointer_names, struct_field_assignments)
+        stack.extend(current.children)
 
 
 def _find_pointer_call(
